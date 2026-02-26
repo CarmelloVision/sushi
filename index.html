@@ -25,7 +25,6 @@
     transition: opacity 0.5s ease;
   }
 
-  /* Scroller is ONLY active during animation, disabled after */
   #scroller {
     position: fixed;
     top: 0; left: 0;
@@ -36,11 +35,7 @@
   }
   #scroller::-webkit-scrollbar { display: none; }
   #scroller { scrollbar-width: none; }
-  /* When animation is done, scroller becomes invisible/passthrough */
-  #scroller.done {
-    pointer-events: none;
-    overflow: hidden;
-  }
+  #scroller.done { pointer-events: none; overflow: hidden; }
 
   #scroll-content { height: 400vh; width: 100%; }
 
@@ -110,14 +105,12 @@
 </div>
 
 <script>
-  const BASE    = 'https://raw.githubusercontent.com/CarmelloVision/sushi/main/';
-  const TOTAL   = 192;
-  const PRELOAD = 15;
-
-  // Load only every 2nd frame = 96 images instead of 192
-  // Halves memory usage with barely visible quality difference
-  const FRAME_STEP = 2;
+  const BASE       = 'https://raw.githubusercontent.com/CarmelloVision/sushi/main/';
+  const TOTAL      = 192;
+  const FRAME_STEP = 2;           // load every 2nd frame = 96 images
   const EFFECTIVE  = Math.ceil(TOTAL / FRAME_STEP);
+  const PRELOAD    = 5;           // show after just 5 frames load (fixes black refresh)
+  const BUMP_PX    = window.screen.height;
 
   function fname(i) {
     return `frame_${String(i).padStart(3,'0')}_delay-0.041s.jpg`;
@@ -131,12 +124,12 @@
   const fade     = document.getElementById('fade');
   const hint     = document.getElementById('hint');
 
-  // Only load even frames (0, 2, 4 ... 190) = 96 images
   const imgs  = {};
-  let loaded  = 0, ready = false;
+  let loadCount = 0, ready = false;
   let cur = 0, tgt = 0, ticking = false;
   let bumpSent = false;
 
+  // ── Resize ────────────────────────────────────────────────────
   function resize() {
     canvas.width  = window.innerWidth;
     canvas.height = window.innerHeight;
@@ -145,6 +138,7 @@
   window.addEventListener('resize', resize);
   resize();
 
+  // ── Draw ──────────────────────────────────────────────────────
   function drawImg(img) {
     const cw = canvas.width, ch = canvas.height;
     const s  = Math.max(cw / img.naturalWidth, ch / img.naturalHeight);
@@ -153,14 +147,12 @@
     ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
   }
 
-  function drawFrame(frameIndex) {
-    // Round to nearest loaded frame
-    const nearest = Math.round(frameIndex / FRAME_STEP) * FRAME_STEP;
+  function drawFrame(frameIdx) {
+    const nearest = Math.round(frameIdx / FRAME_STEP) * FRAME_STEP;
     const clamped = Math.min(TOTAL - FRAME_STEP, Math.max(0, nearest));
-    const img = imgs[clamped];
+    const img     = imgs[clamped];
     if (!img?.complete || !img.naturalWidth) {
-      // Find nearest loaded
-      for (let o = FRAME_STEP; o < 20; o += FRAME_STEP) {
+      for (let o = FRAME_STEP; o < 30; o += FRAME_STEP) {
         const f = imgs[Math.max(0, clamped - o)];
         if (f?.complete && f.naturalWidth) { drawImg(f); return; }
       }
@@ -169,16 +161,18 @@
     drawImg(img);
   }
 
+  // ── Seek ──────────────────────────────────────────────────────
   function seek() {
     if (Math.abs(cur - tgt) < FRAME_STEP) { cur = tgt; ticking = false; return; }
     const diff = tgt - cur;
-    cur += Math.sign(diff) * Math.max(FRAME_STEP, Math.round(Math.abs(diff) * 0.3));
+    cur += Math.sign(diff) * Math.max(FRAME_STEP, Math.round(Math.abs(diff) * 0.35));
     cur  = Math.min(TOTAL - 1, Math.max(0, cur));
     drawFrame(cur);
     if (Math.abs(cur - tgt) >= FRAME_STEP) requestAnimationFrame(seek);
     else { cur = tgt; ticking = false; }
   }
 
+  // ── Internal scroll ───────────────────────────────────────────
   scroller.addEventListener('scroll', () => {
     if (!ready) return;
 
@@ -189,37 +183,73 @@
 
     hint.classList.remove('visible');
 
+    // Animation complete — bump parent down and release scroller
     if (progress >= 0.95 && !bumpSent) {
       bumpSent = true;
       fade.style.opacity = '0';
-
       setTimeout(() => {
-        // ── Disable the internal scroller so page scroll takes over ──
         scroller.classList.add('done');
-
-        // ── Bump the parent Squarespace page down ─────────────────
-        const bumpPx = window.screen.height;
-        try { window.parent.scrollBy({ top: bumpPx, behavior: 'smooth' }); } catch(e) {}
-        try { window.top.scrollBy({ top: bumpPx, behavior: 'smooth' }); } catch(e) {}
+        try { window.parent.scrollBy({ top: BUMP_PX, behavior: 'smooth' }); } catch(e) {}
+        try { window.top.scrollBy({ top: BUMP_PX, behavior: 'smooth' }); } catch(e) {}
       }, 300);
     }
 
-    // Reset when scrolling back to top
+    // Reset when back near top
     if (progress < 0.05) {
       bumpSent = false;
       fade.style.opacity = '1';
       scroller.classList.remove('done');
     }
-
   }, { passive: true });
 
-  // Show hint
+  // ── Receive parent scroll position from Squarespace snippet ───
+  // When parent scrolls back up to near the top of the iframe,
+  // reset our internal scroller so reverse animation works
+  window.addEventListener('message', (e) => {
+    if (!e.data) return;
+
+    // Parent tells us it scrolled back near top of iframe
+    if (e.data.action === 'resetScroller') {
+      bumpSent = false;
+      fade.style.opacity = '1';
+      scroller.classList.remove('done');
+      scroller.scrollTop = 0;
+      tgt = 0;
+      if (!ticking) { ticking = true; seek(); }
+    }
+
+    // Parent sends its scroll position — we use it to drive animation
+    if (typeof e.data.parentScrollY === 'number') {
+      const iframeTop = e.data.iframeTop || 0;
+      const relScroll = Math.max(0, e.data.parentScrollY - iframeTop);
+
+      // If parent scrolled back above the iframe, reset
+      if (e.data.parentScrollY < iframeTop + 50) {
+        bumpSent = false;
+        fade.style.opacity = '1';
+        scroller.classList.remove('done');
+        scroller.scrollTop = 0;
+        tgt = 0;
+        if (!ticking) { ticking = true; seek(); }
+      }
+    }
+  });
+
+  // ── Hint ──────────────────────────────────────────────────────
   setTimeout(() => {
     if (ready && scroller.scrollTop < 10) hint.classList.add('visible');
-  }, 2500);
+  }, 2000);
 
-  // ── Load only every FRAME_STEP frame ─────────────────────────
-  let loadCount = 0;
+  // ── Fallback: force show after 8s even if images still loading ─
+  setTimeout(() => {
+    if (!ready) {
+      ready = true;
+      drawFrame(0);
+      loader.classList.add('hidden');
+    }
+  }, 8000);
+
+  // ── Load frames ───────────────────────────────────────────────
   for (let i = 0; i < TOTAL; i += FRAME_STEP) {
     const img       = new Image();
     img.crossOrigin = 'anonymous';
@@ -227,11 +257,23 @@
     img.onload = () => {
       loadCount++;
       lf.style.width = Math.round((loadCount / EFFECTIVE) * 100) + '%';
+
+      // Draw frame 0 immediately as soon as first image loads
+      if (loadCount === 1) {
+        canvas.width  = window.innerWidth;
+        canvas.height = window.innerHeight;
+        drawImg(img);
+      }
+
+      // Show animation after PRELOAD frames
       if (loadCount === PRELOAD && !ready) {
         ready = true;
         resize();
         drawFrame(0);
         loader.classList.add('hidden');
+        setTimeout(() => {
+          if (scroller.scrollTop < 10) hint.classList.add('visible');
+        }, 2000);
       }
     };
     img.onerror = () => { loadCount++; };
