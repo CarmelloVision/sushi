@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #000; width: 100%; height: 100%; overflow: hidden; }
+
+  #c {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    background: #000;
+    z-index: 0;
+  }
+
+  #fade {
+    position: fixed;
+    bottom: 0; left: 0;
+    width: 100%; height: 200px;
+    background: linear-gradient(to bottom, transparent, #000);
+    pointer-events: none;
+    z-index: 2;
+    transition: opacity 0.5s ease;
+  }
+
+  /* Scroller is ONLY active during animation, disabled after */
+  #scroller {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    overflow-y: scroll;
+    z-index: 3;
+    -webkit-overflow-scrolling: touch;
+  }
+  #scroller::-webkit-scrollbar { display: none; }
+  #scroller { scrollbar-width: none; }
+  /* When animation is done, scroller becomes invisible/passthrough */
+  #scroller.done {
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  #scroll-content { height: 400vh; width: 100%; }
+
+  #hint {
+    position: fixed;
+    bottom: 36px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 4;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+    pointer-events: none;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+  }
+  #hint.visible { opacity: 1; }
+  #hint span {
+    color: rgba(255,255,255,0.4);
+    font-family: Georgia, serif;
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+  }
+  #hint svg { animation: bounce 1.5s ease-in-out infinite; }
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(7px); }
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    background: #000;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    z-index: 99;
+    transition: opacity 0.8s ease;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  .lt {
+    color: rgba(255,255,255,0.3);
+    font-family: Georgia, serif;
+    font-size: 10px; letter-spacing: 0.35em;
+    text-transform: uppercase; margin-bottom: 18px;
+  }
+  .lb { width: 140px; height: 1px; background: rgba(255,255,255,0.1); overflow: hidden; }
+  .lf { height: 100%; background: rgba(255,255,255,0.5); width: 0%; transition: width 0.08s linear; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <p class="lt">Loading</p>
+  <div class="lb"><div class="lf" id="lf"></div></div>
+</div>
+
+<canvas id="c"></canvas>
+<div id="fade"></div>
+
+<div id="hint">
+  <span>Scroll</span>
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <path d="M8 2v12M3 9l5 5 5-5" stroke="rgba(255,255,255,0.4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+</div>
+
+<div id="scroller">
+  <div id="scroll-content"></div>
+</div>
+
+<script>
+  const BASE    = 'https://raw.githubusercontent.com/CarmelloVision/sushi/main/';
+  const TOTAL   = 192;
+  const PRELOAD = 15;
+
+  // Load only every 2nd frame = 96 images instead of 192
+  // Halves memory usage with barely visible quality difference
+  const FRAME_STEP = 2;
+  const EFFECTIVE  = Math.ceil(TOTAL / FRAME_STEP);
+
+  function fname(i) {
+    return `frame_${String(i).padStart(3,'0')}_delay-0.041s.jpg`;
+  }
+
+  const canvas   = document.getElementById('c');
+  const ctx      = canvas.getContext('2d');
+  const scroller = document.getElementById('scroller');
+  const lf       = document.getElementById('lf');
+  const loader   = document.getElementById('loading');
+  const fade     = document.getElementById('fade');
+  const hint     = document.getElementById('hint');
+
+  // Only load even frames (0, 2, 4 ... 190) = 96 images
+  const imgs  = {};
+  let loaded  = 0, ready = false;
+  let cur = 0, tgt = 0, ticking = false;
+  let bumpSent = false;
+
+  function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    drawFrame(cur);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function drawImg(img) {
+    const cw = canvas.width, ch = canvas.height;
+    const s  = Math.max(cw / img.naturalWidth, ch / img.naturalHeight);
+    const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+  }
+
+  function drawFrame(frameIndex) {
+    // Round to nearest loaded frame
+    const nearest = Math.round(frameIndex / FRAME_STEP) * FRAME_STEP;
+    const clamped = Math.min(TOTAL - FRAME_STEP, Math.max(0, nearest));
+    const img = imgs[clamped];
+    if (!img?.complete || !img.naturalWidth) {
+      // Find nearest loaded
+      for (let o = FRAME_STEP; o < 20; o += FRAME_STEP) {
+        const f = imgs[Math.max(0, clamped - o)];
+        if (f?.complete && f.naturalWidth) { drawImg(f); return; }
+      }
+      return;
+    }
+    drawImg(img);
+  }
+
+  function seek() {
+    if (Math.abs(cur - tgt) < FRAME_STEP) { cur = tgt; ticking = false; return; }
+    const diff = tgt - cur;
+    cur += Math.sign(diff) * Math.max(FRAME_STEP, Math.round(Math.abs(diff) * 0.3));
+    cur  = Math.min(TOTAL - 1, Math.max(0, cur));
+    drawFrame(cur);
+    if (Math.abs(cur - tgt) >= FRAME_STEP) requestAnimationFrame(seek);
+    else { cur = tgt; ticking = false; }
+  }
+
+  scroller.addEventListener('scroll', () => {
+    if (!ready) return;
+
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+    const progress  = scroller.scrollTop / maxScroll;
+    tgt = Math.min(TOTAL - 1, Math.floor(progress * TOTAL));
+    if (!ticking) { ticking = true; seek(); }
+
+    hint.classList.remove('visible');
+
+    if (progress >= 0.95 && !bumpSent) {
+      bumpSent = true;
+      fade.style.opacity = '0';
+
+      setTimeout(() => {
+        // ── Disable the internal scroller so page scroll takes over ──
+        scroller.classList.add('done');
+
+        // ── Bump the parent Squarespace page down ─────────────────
+        const bumpPx = window.screen.height;
+        try { window.parent.scrollBy({ top: bumpPx, behavior: 'smooth' }); } catch(e) {}
+        try { window.top.scrollBy({ top: bumpPx, behavior: 'smooth' }); } catch(e) {}
+      }, 300);
+    }
+
+    // Reset when scrolling back to top
+    if (progress < 0.05) {
+      bumpSent = false;
+      fade.style.opacity = '1';
+      scroller.classList.remove('done');
+    }
+
+  }, { passive: true });
+
+  // Show hint
+  setTimeout(() => {
+    if (ready && scroller.scrollTop < 10) hint.classList.add('visible');
+  }, 2500);
+
+  // ── Load only every FRAME_STEP frame ─────────────────────────
+  let loadCount = 0;
+  for (let i = 0; i < TOTAL; i += FRAME_STEP) {
+    const img       = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src         = BASE + fname(i);
+    img.onload = () => {
+      loadCount++;
+      lf.style.width = Math.round((loadCount / EFFECTIVE) * 100) + '%';
+      if (loadCount === PRELOAD && !ready) {
+        ready = true;
+        resize();
+        drawFrame(0);
+        loader.classList.add('hidden');
+      }
+    };
+    img.onerror = () => { loadCount++; };
+    imgs[i] = img;
+  }
+</script>
+</body>
+</html>
